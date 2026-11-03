@@ -5,6 +5,8 @@ import hashlib
 import hmac
 from datetime import datetime
 from io import BytesIO
+from streamlit_geolocation import streamlit_geolocation
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -132,21 +134,39 @@ with st.sidebar:
     st.divider()
     st.caption("Prototype note: stock results depend on the latest updates submitted by pharmacies.")
 
+
 # ---------------- PATIENT SEARCH ----------------
 if page == "Patient Search":
     st.header("Find medicines near you")
-    medicine_search = st.text_input("Medicine name", placeholder="e.g. Paracetamol")
-    c1, c2 = st.columns(2)
-    with c1:
-        user_lat = st.number_input("Your latitude (optional)", value=0.0, format="%.6f")
-    with c2:
-        user_lon = st.number_input("Your longitude (optional)", value=0.0, format="%.6f")
+    medicine_search = st.text_input(
+        "Medicine name",
+        placeholder="e.g. Paracetamol"
+    )
+
+    # Automatically detect the patient's browser location
+    location = streamlit_geolocation()
+
+    user_lat = None
+    user_lon = None
+
+    if isinstance(location, dict):
+        user_lat = location.get("latitude")
+        user_lon = location.get("longitude")
+
+    if user_lat is not None and user_lon is not None:
+        st.success("Your current location has been detected!")
+    else:
+        st.info(
+            "Allow location access in your browser "
+            "to find nearby pharmacies."
+        )
 
     if st.button("Search availability", type="primary"):
         if not medicine_search.strip():
             st.warning("Enter a medicine name first.")
         else:
             like = f"%{medicine_search.strip()}%"
+
             rows = query_db("""
                 SELECT m.name, m.strength, m.form, p.name AS pharmacy,
                        p.address, p.contact, p.latitude, p.longitude,
@@ -160,56 +180,134 @@ if page == "Patient Search":
             """, (like, like))
 
             if not rows:
-                st.info("No matching in-stock records were found. Try another spelling or check again later.")
+                st.info(
+                    "No matching in-stock records were found. "
+                    "Try another spelling or check again later."
+                )
             else:
-                if user_lat != 0 and user_lon != 0:
+                # Calculate distance only when browser GPS is available
+                if user_lat is not None and user_lon is not None:
+
                     def distance(row):
                         if row["latitude"] is None or row["longitude"] is None:
                             return 10**9
+
                         r = 6371
-                        lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
-                        lat2, lon2 = math.radians(float(row["latitude"])), math.radians(float(row["longitude"]))
-                        a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin((lon2-lon1)/2)**2
-                        return 2*r*math.asin(math.sqrt(a))
+                        lat1 = math.radians(float(user_lat))
+                        lon1 = math.radians(float(user_lon))
+                        lat2 = math.radians(float(row["latitude"]))
+                        lon2 = math.radians(float(row["longitude"]))
+
+                        a = (
+                            math.sin((lat2 - lat1) / 2) ** 2
+                            + math.cos(lat1) * math.cos(lat2)
+                            * math.sin((lon2 - lon1) / 2) ** 2
+                        )
+
+                        return 2 * r * math.asin(math.sqrt(a))
+
                     for row in rows:
                         row["distance_km"] = round(distance(row), 2)
-                    rows.sort(key=lambda x: x["distance_km"])
+
+                    rows.sort(
+                        key=lambda x: x["distance_km"]
+                    )
                 else:
                     for row in rows:
                         row["distance_km"] = None
 
-                st.success(f"Found {len(rows)} matching pharmacy record(s).")
+                st.success(
+                    f"Found {len(rows)} matching pharmacy record(s)."
+                )
+
                 for row in rows:
                     with st.container(border=True):
-                        st.subheader(f'{row["name"]} {row["strength"] or ""} {row["form"] or ""}')
+                        st.subheader(
+                            f'{row["name"]} {row["strength"] or ""} '
+                            f'{row["form"] or ""}'
+                        )
+
                         a, b, c = st.columns(3)
                         a.metric("Units reported", row["quantity"])
                         b.metric("Pharmacy", row["pharmacy"])
-                        c.metric("Distance", f'{row["distance_km"]} km' if row["distance_km"] is not None else "Not provided")
+
+                        c.metric(
+                            "Distance",
+                            f'{row["distance_km"]} km'
+                            if row["distance_km"] is not None
+                            else "Not provided"
+                        )
+
                         st.write(f'**Address:** {row["address"]}')
                         st.write(f'**Contact:** {row["contact"]}')
-                        st.caption(f'Last updated: {row["last_updated"]}')
-                        age_hours = (datetime.now() - row["last_updated"]).total_seconds()/3600 if isinstance(row["last_updated"], datetime) else 999999
-                        if age_hours > 24:
-                            st.warning("This stock record is older than 24 hours. Call the pharmacy to confirm before travelling.")
-                        else:
-                            st.info("Stock reported recently. Please call the pharmacy to confirm before travelling.")
 
-                # Verified alternatives only; never infer a substitute from name similarity.
+                        # Google Maps navigation
+                        if row["latitude"] is not None and row["longitude"] is not None:
+                            destination = (
+                                f'{float(row["latitude"])},{float(row["longitude"])}'
+                            )
+                        else:
+                            destination = quote(row["address"] or row["pharmacy"])
+
+                        maps_url = (
+                            "https://www.google.com/maps/dir/?api=1"
+                            f"&destination={destination}"
+                        )
+
+                        st.link_button(
+                            "Navigate to pharmacy",
+                            maps_url,
+                            use_container_width=True
+                        )
+
+                        st.caption(f'Last updated: {row["last_updated"]}')
+
+
+                        age_hours = (
+                            (datetime.now() - row["last_updated"]).total_seconds() / 3600
+                            if isinstance(row["last_updated"], datetime)
+                            else 999999
+                        )
+
+                        if age_hours > 24:
+                            st.warning(
+                                "This stock record is older than 24 hours. "
+                                "Call the pharmacy to confirm before travelling."
+                            )
+                        else:
+                            st.info(
+                                "Stock reported recently. "
+                                "Please call the pharmacy to confirm before travelling."
+                            )
+
+                # Display pharmacist-verified alternatives only
                 alt_rows = query_db("""
                     SELECT DISTINCT ma.verified_alternative, ma.generic_group
                     FROM alternative_mapping ma
                     JOIN medicine m ON m.medicine_id = ma.medicine_id
-                    WHERE m.name LIKE %s AND ma.review_status = 'verified'
+                    WHERE m.name LIKE %s
+                      AND ma.review_status = 'verified'
                 """, (like,))
+
                 if alt_rows:
                     st.subheader("Pharmacist-verified alternatives")
+
                     for alt in alt_rows:
-                        st.write(f'• {alt["verified_alternative"]} ({alt["generic_group"] or "same mapped group"})')
-                    st.caption("Confirm any alternative with a registered pharmacist and the prescribing clinician.")
+                        st.write(
+                            f'• {alt["verified_alternative"]} '
+                            f'({alt["generic_group"] or "same mapped group"})'
+                        )
+
+                    st.caption(
+                        "Confirm any alternative with a registered pharmacist "
+                        "and the prescribing clinician."
+                    )
 
     st.divider()
-    st.caption("This prototype provides stock discovery only. It does not diagnose conditions or prescribe medicines.")
+    st.caption(
+        "This prototype provides stock discovery only. "
+        "It does not diagnose conditions or prescribe medicines."
+    )
 
 # ---------------- CHEMIST PORTAL ----------------
 else:
@@ -378,4 +476,4 @@ else:
         if low:
             st.dataframe(pd.DataFrame(low), use_container_width=True, hide_index=True)
 
-st.caption("Academic prototype • Always verify live stock by calling the pharmacy. Not a substitute for medical advice.")
+    st.caption("Academic prototype • Always verify live stock by calling the pharmacy. Not a substitute for medical advice.")
